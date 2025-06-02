@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+scikit-learn
+shap
+matplotlib
+seaborn
+joblib
+openpyxl # For .xlsx file support
