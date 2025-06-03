@@ -7,3 +7,6 @@ matplotlib
 seaborn
 joblib
 openpyxl # For .xlsx file support
+xgboost>=1.7.0
+lightgbm>=4.0.0
+catboost>=1.2.0

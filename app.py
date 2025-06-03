@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, RandomForestRegressor, GradientBoostingRegressor
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.svm import SVC, SVR
@@ -11,6 +11,10 @@ from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score, f1_score
+# Import advanced models
+import xgboost as xgb
+import lightgbm as lgb
+import catboost as cb
 import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -357,6 +361,17 @@ def model_training_page():
     scaling_method = col2.selectbox("Numeric Feature Scaling", options=scaling_method_options, index=1, key='scaling_method_selector') # Default to StandardScaler
     st.session_state.scaling_method = scaling_method # Store for use during preprocessing
 
+    st.subheader("Hyperparameter Tuning")
+    enable_tuning = st.checkbox("Enable Hyperparameter Tuning", value=False)
+    if enable_tuning:
+        tuning_method = st.selectbox("Select Tuning Method", ["Grid Search", "Randomized Search"], key='tuning_method')
+        if tuning_method == "Randomized Search":
+            n_iter = st.number_input("Number of Iterations (for Randomized Search)", min_value=10, value=50, step=10)
+            st.session_state.n_iter = n_iter
+        st.session_state.tuning_method = tuning_method
+    else:
+        st.session_state.tuning_method = None
+
     # Auto-start training if triggered
     start_button_pressed = st.button("🎯 Start Training", type="primary", key='manual_start_train_button')
     if st.session_state.get('auto_run_triggered_for_training') and not start_button_pressed:
@@ -435,30 +450,97 @@ def model_training_page():
                 st.session_state.update({'X_train': X_train, 'X_test': X_test, 'y_train': y_train, 'y_test': y_test})
 
                 # Define models based on problem type
+                # Define models and their parameter grids for tuning
                 if st.session_state.problem_type == "Classification":
-                    models_to_train = {
-                        "Logistic Regression": LogisticRegression(random_state=random_state, max_iter=1000),
-                        "Decision Tree": DecisionTreeClassifier(random_state=random_state),
-                        "Random Forest": RandomForestClassifier(random_state=random_state),
-                        "Gradient Boosting": GradientBoostingClassifier(random_state=random_state),
-                        "Support Vector Machine": SVC(random_state=random_state, probability=True),
-                        "K-Nearest Neighbors": KNeighborsClassifier(),
-                        "Gaussian Naive Bayes": GaussianNB()
+                    models_and_params = {
+                        "Logistic Regression": {
+                            'model': LogisticRegression(random_state=random_state, max_iter=1000),
+                            'params': {'C': [0.1, 1.0, 10.0], 'solver': ['liblinear', 'lbfgs']}
+                        },
+                        "Decision Tree": {
+                            'model': DecisionTreeClassifier(random_state=random_state),
+                            'params': {'max_depth': [None, 10, 20, 30], 'min_samples_leaf': [1, 5, 10]}
+                        },
+                        "Random Forest": {
+                            'model': RandomForestClassifier(random_state=random_state),
+                            'params': {'n_estimators': [100, 200], 'max_depth': [10, 20]}
+                        },
+                        "Gradient Boosting": {
+                            'model': GradientBoostingClassifier(random_state=random_state),
+                            'params': {'n_estimators': [100, 200], 'learning_rate': [0.01, 0.1]}
+                        },
+                        "XGBoost": {
+                            'model': xgb.XGBClassifier(random_state=random_state, use_label_encoder=False, eval_metric='logloss'),
+                            'params': {'n_estimators': [100, 200], 'learning_rate': [0.01, 0.1], 'max_depth': [3, 6]}
+                        },
+                        "LightGBM": {
+                            'model': lgb.LGBMClassifier(random_state=random_state),
+                            'params': {'n_estimators': [100, 200], 'learning_rate': [0.01, 0.1], 'num_leaves': [31, 50]}
+                        },
+                        "CatBoost": {
+                            'model': cb.CatBoostClassifier(random_state=random_state, verbose=0),
+                            'params': {'iterations': [100, 200], 'learning_rate': [0.01, 0.1], 'depth': [4, 6]}
+                        },
+                        "Support Vector Machine": {
+                            'model': SVC(random_state=random_state, probability=True),
+                            'params': {'C': [0.1, 1.0, 10.0], 'kernel': ['linear', 'rbf']}
+                        },
+                        "K-Nearest Neighbors": {
+                            'model': KNeighborsClassifier(),
+                            'params': {'n_neighbors': [3, 5, 7], 'weights': ['uniform', 'distance']}
+                        },
+                        "Gaussian Naive Bayes": {
+                            'model': GaussianNB(),
+                            'params': {}
+                        }
                     }
                     scoring = 'accuracy'
                 else: # Regression
-                    # Local imports for LinearRegression, Ridge, RandomForestRegressor, etc.
-                    # are removed as these models are now imported globally by the first search/replace block.
-                    # ElasticNet is also imported globally.
-                    models_to_train = {
-                        "Linear Regression": LinearRegression(),
-                        "Ridge Regression": Ridge(random_state=random_state),
-                        "ElasticNet Regression": ElasticNet(random_state=random_state),
-                        "Random Forest Regressor": RandomForestRegressor(random_state=random_state),
-                        "Gradient Boosting Regressor": GradientBoostingRegressor(random_state=random_state),
-                        "Decision Tree Regressor": DecisionTreeRegressor(random_state=random_state),
-                        "Support Vector Regressor": SVR(),
-                        "K-Nearest Neighbors Regressor": KNeighborsRegressor()
+                    models_and_params = {
+                        "Linear Regression": {
+                            'model': LinearRegression(),
+                            'params': {}
+                        },
+                        "Ridge Regression": {
+                            'model': Ridge(random_state=random_state),
+                            'params': {'alpha': [0.1, 1.0, 10.0]}
+                        },
+                        "ElasticNet Regression": {
+                            'model': ElasticNet(random_state=random_state),
+                            'params': {'alpha': [0.1, 1.0, 10.0], 'l1_ratio': [0.1, 0.5, 0.9]}
+                        },
+                        "Random Forest Regressor": {
+                            'model': RandomForestRegressor(random_state=random_state),
+                            'params': {'n_estimators': [100, 200], 'max_depth': [10, 20]}
+                        },
+                        "Gradient Boosting Regressor": {
+                            'model': GradientBoostingRegressor(random_state=random_state),
+                            'params': {'n_estimators': [100, 200], 'learning_rate': [0.01, 0.1]}
+                        },
+                        "XGBoost Regressor": {
+                            'model': xgb.XGBRegressor(random_state=random_state),
+                            'params': {'n_estimators': [100, 200], 'learning_rate': [0.01, 0.1], 'max_depth': [3, 6]}
+                        },
+                        "LightGBM Regressor": {
+                            'model': lgb.LGBMRegressor(random_state=random_state),
+                            'params': {'n_estimators': [100, 200], 'learning_rate': [0.01, 0.1], 'num_leaves': [31, 50]}
+                        },
+                        "CatBoost Regressor": {
+                            'model': cb.CatBoostRegressor(random_state=random_state, verbose=0),
+                            'params': {'iterations': [100, 200], 'learning_rate': [0.01, 0.1], 'depth': [4, 6]}
+                        },
+                        "Decision Tree Regressor": {
+                            'model': DecisionTreeRegressor(random_state=random_state),
+                            'params': {'max_depth': [None, 10, 20, 30], 'min_samples_leaf': [1, 5, 10]}
+                        },
+                        "Support Vector Regressor": {
+                            'model': SVR(),
+                            'params': {'C': [0.1, 1.0, 10.0], 'kernel': ['linear', 'rbf']}
+                        },
+                        "K-Nearest Neighbors Regressor": {
+                            'model': KNeighborsRegressor(),
+                            'params': {'n_neighbors': [3, 5, 7], 'weights': ['uniform', 'distance']}
+                        }
                     }
                     scoring = 'r2'
 
@@ -467,22 +549,44 @@ def model_training_page():
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
-                for i, (name, model) in enumerate(models_to_train.items()):
-                    status_text.text(f"Training {name}...")
-                    model.fit(X_train, y_train)
-                    trained_models[name] = model
+                tuning_enabled = st.session_state.get('tuning_method') is not None
+                n_iter = st.session_state.get('n_iter', 50) # Default for Randomized Search
+
+                for i, (name, model_info) in enumerate(models_and_params.items()):
+                    model = model_info['model']
+                    params = model_info['params']
+
+                    if tuning_enabled and params:
+                        status_text.text(f"Tuning {name}...")
+                        if st.session_state.tuning_method == "Grid Search":
+                            tuner = GridSearchCV(model, params, cv=cv_folds, scoring=scoring, n_jobs=-1)
+                        else: # Randomized Search
+                            tuner = RandomizedSearchCV(model, params, n_iter=n_iter, cv=cv_folds, scoring=scoring, random_state=random_state, n_jobs=-1)
+                        
+                        tuner.fit(X_train, y_train)
+                        best_model = tuner.best_estimator_
+                        st.write(f"Best parameters for {name}: {tuner.best_params_}")
+                    else:
+                        status_text.text(f"Training {name}...")
+                        best_model = model
+                        best_model.fit(X_train, y_train)
                     
-                    y_pred_test = model.predict(X_test)
-                    y_proba_test = model.predict_proba(X_test) if hasattr(model, 'predict_proba') and st.session_state.problem_type == "Classification" else None
+                    trained_models[name] = best_model
+                    
+                    y_pred_test = best_model.predict(X_test)
+                    y_proba_test = best_model.predict_proba(X_test) if hasattr(best_model, 'predict_proba') and st.session_state.problem_type == "Classification" else None
                     
                     metrics = get_model_metrics(y_test, y_pred_test, y_proba_test, problem_type=st.session_state.problem_type)
-                    cv_score = cross_val_score(model, X_train, y_train, cv=cv_folds, scoring=scoring).mean()
+                    
+                    # For tuned models, cross_val_score on the best_estimator_ might be redundant if tuner already did CV
+                    # But for consistency, we can still calculate it or use tuner.best_score_
+                    cv_score = cross_val_score(best_model, X_train, y_train, cv=cv_folds, scoring=scoring).mean()
                     
                     current_model_scores = {'CV Mean Score': cv_score}
                     current_model_scores.update(metrics) # Add all relevant metrics
                     model_scores_dict[name] = current_model_scores
 
-                    progress_bar.progress((i + 1) / len(models_to_train))
+                    progress_bar.progress((i + 1) / len(models_and_params))
                 
                 st.session_state.models = trained_models
                 st.session_state.model_scores = model_scores_dict
