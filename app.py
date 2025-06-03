@@ -843,7 +843,5 @@ def main():
     elif page == "Model Export":
         model_export_page()
 
-    st.sidebar.markdown("---_Developed with Trae AI_---")
-
 if __name__ == "__main__":
     main()
