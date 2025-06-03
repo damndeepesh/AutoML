@@ -8,7 +8,7 @@ from sklearn.svm import SVC, SVR
 from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, ElasticNet
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.naive_bayes import GaussianNB
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score, f1_score
 import shap
@@ -61,6 +61,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- Helper Functions ---
+def display_error(e, context="An unexpected error occurred"):
+    """Displays a user-friendly error message."""
+    st.error(f"😕 Oops! Something went wrong. {context}. Please check your inputs or the data format.")
+    st.error(f"Details: {str(e)}")
+    # Optionally, log the full traceback for debugging, but don't show it to the user by default
+    # import traceback
+    # st.expander("See Full Error Traceback").error(traceback.format_exc())
+
 def get_model_metrics(y_true, y_pred, y_proba=None, problem_type='Classification'):
     metrics = {}
     if problem_type == "Classification":
@@ -141,7 +149,7 @@ def data_upload_page():
             st.session_state.problem_type = None
             st.session_state.source_data_type = 'single'
         except Exception as e:
-            st.error(f"Error reading single file: {e}")
+            display_error(e, "Failed to read the uploaded single file")
             return
     elif uploaded_train_file:
         try:
@@ -158,7 +166,7 @@ def data_upload_page():
             else:
                 st.session_state.test_data = None # Explicitly set to None
         except Exception as e:
-            st.error(f"Error reading train/test files: {e}")
+            display_error(e, "Failed to read the uploaded train/test files")
             return
 
     if df is not None:
@@ -226,7 +234,7 @@ def data_upload_page():
                     st.session_state.problem_type = "Regression"
                 else:
                     st.session_state.problem_type = "Unsupported Target Type"
-                    st.error("Target column type is not suitable for classification or regression.")
+                    st.error("The selected target column has an unsupported data type. Please choose a numeric column for regression or a categorical/binary column for classification.")
                     return
 
                 st.success(f"Target column '{target_column}' selected. Problem Type: {st.session_state.problem_type}")
@@ -239,7 +247,7 @@ def data_upload_page():
                     col3_test.metric("Test Missing Values", st.session_state.test_data.isnull().sum().sum())
                     st.dataframe(st.session_state.test_data.head(5), use_container_width=True)
                     if target_column not in st.session_state.test_data.columns:
-                        st.error(f"Target column '{target_column}' not found in the uploaded test data. Please ensure column names match.")
+                        st.error(f"The target column '{target_column}' was not found in your uploaded test data. Please ensure the column names match exactly between your training and testing datasets.")
                         return # Stop further processing if target is missing in test data
 
                 st.subheader(f"Target Column Distribution (in {'Training Data' if st.session_state.get('source_data_type') == 'separate' else 'Uploaded Data'}): {target_column}")
@@ -253,19 +261,17 @@ def data_upload_page():
                     st.pyplot(fig)
 
         except Exception as e:
-            st.error(f"Error reading or processing file: {e}")
+            display_error(e, "An error occurred while reading or performing initial processing on the file")
             if auto_run_training and st.session_state.target_column:
                 st.session_state.auto_run_triggered = True
                 st.experimental_rerun() # Rerun to switch page or trigger training
 
         except Exception as e:
-            st.error(f"Error processing data: {e}")
-            import traceback
-            st.error(traceback.format_exc())
+            display_error(e, "An error occurred during data processing and analysis")
     else:
         st.info("👆 Please upload a CSV or Excel file (or separate train/test files) to get started.")
 
-def preprocess_data(df, target_column):
+def preprocess_data(df, target_column, scaling_method="None"):
     X = df.drop(columns=[target_column])
     y = df[target_column].copy() # Use .copy() to avoid SettingWithCopyWarning
 
@@ -299,6 +305,9 @@ def preprocess_data(df, target_column):
     if len(cat_cols) > 0:
         X[cat_cols] = cat_imputer.fit_transform(X[cat_cols])
 
+    # Scaling is handled in the model_training_page after splitting, so not here.
+    # This function will just do imputation and encoding.
+
     # Encode categorical features
     le_dict_features = {}
     for col in cat_cols:
@@ -328,10 +337,10 @@ def model_training_page():
     data_available = (st.session_state.data is not None) or \
                      (st.session_state.train_data is not None)
     if not data_available or st.session_state.target_column is None:
-        st.warning("⚠️ Please upload data (single or train/test) and select a target column first.")
+        st.warning("⚠️ Please upload your data and select a target column on the 'Data Upload & Preview' page before proceeding to model training.")
         return
     if st.session_state.problem_type == "Unsupported Target Type":
-        st.error("Cannot train models with the current target column type.")
+        st.error("Cannot train models because the selected target column has an unsupported data type. Please go back and select a suitable target column.")
         return
 
     target = st.session_state.target_column
@@ -343,7 +352,10 @@ def model_training_page():
     test_size = col1.slider("Test Size (if splitting single file)", 0.1, 0.5, 0.2, 0.05, disabled=disable_test_size)
     random_state = col1.number_input("Random State", value=42, min_value=0)
     cv_folds = col2.slider("Cross-Validation Folds", 3, 10, 5)
-    scale_features = col2.checkbox("Scale Numeric Features", value=True)
+    # scale_features checkbox is replaced by a selectbox for scaling_method
+    scaling_method_options = ["None", "StandardScaler", "MinMaxScaler"]
+    scaling_method = col2.selectbox("Numeric Feature Scaling", options=scaling_method_options, index=1, key='scaling_method_selector') # Default to StandardScaler
+    st.session_state.scaling_method = scaling_method # Store for use during preprocessing
 
     # Auto-start training if triggered
     start_button_pressed = st.button("🎯 Start Training", type="primary", key='manual_start_train_button')
@@ -364,7 +376,7 @@ def model_training_page():
                     if st.session_state.test_data is not None:
                         df_test_processed = st.session_state.test_data.copy()
                         if target not in df_test_processed.columns:
-                            st.error(f"Target column '{target}' not found in test data during preprocessing. Aborting.")
+                            st.error(f"The target column '{target}' is missing from your test dataset. Please ensure both train and test datasets have the target column with the same name. Aborting training.")
                             return
                         X_test, y_test = preprocess_data(df_test_processed, target) # Preprocess test data separately
                         # Ensure X_test has same columns as X_train after preprocessing (esp. after one-hot encoding if added later)
@@ -384,26 +396,41 @@ def model_training_page():
                     )
 
                 if X_train is None or y_train is None:
-                    st.error("Training data (X_train, y_train) could not be prepared. Please check your data and selections.")
+                    st.error("The training data (features X_train, target y_train) could not be prepared. This might be due to issues in the uploaded data or preprocessing steps. Please review your data and selections.")
                     return
 
                 # Scaling should be fit on X_train and transformed on X_test
-                if scale_features:
+                current_scaling_method = st.session_state.get('scaling_method', 'StandardScaler') # Get from session state
+                if current_scaling_method != "None":
                     num_cols_train = X_train.select_dtypes(include=np.number).columns
                     if len(num_cols_train) > 0:
-                        scaler = StandardScaler()
-                        X_train[num_cols_train] = scaler.fit_transform(X_train[num_cols_train])
-                        st.session_state.scaler = scaler # Save the fitted scaler
-                        if X_test is not None:
-                            num_cols_test = X_test.select_dtypes(include=np.number).columns
-                            # Ensure test set uses the same numeric columns in the same order as train set for scaling
-                            cols_to_scale_in_test = [col for col in num_cols_train if col in X_test.columns]
-                            if len(cols_to_scale_in_test) > 0:
-                                # Create a DataFrame with columns in the order of num_cols_train
-                                X_test_subset_for_scaling = X_test[cols_to_scale_in_test]
-                                X_test_scaled_values = scaler.transform(X_test_subset_for_scaling)
-                                X_test[cols_to_scale_in_test] = X_test_scaled_values
-                            # Handle missing/extra columns if necessary, for now assume they match or subset
+                        if current_scaling_method == "StandardScaler":
+                            scaler = StandardScaler()
+                        elif current_scaling_method == "MinMaxScaler":
+                            scaler = MinMaxScaler()
+                        else:
+                            scaler = None # Should not happen
+                        
+                        if scaler:
+                            X_train[num_cols_train] = scaler.fit_transform(X_train[num_cols_train])
+                            st.session_state.scaler = scaler # Save the fitted scaler
+                            st.info(f"Numeric features in training data scaled using {current_scaling_method}.")
+                            if X_test is not None:
+                                num_cols_test = X_test.select_dtypes(include=np.number).columns
+                                # Ensure test set uses the same numeric columns in the same order as train set for scaling
+                                cols_to_scale_in_test = [col for col in num_cols_train if col in X_test.columns]
+                                if len(cols_to_scale_in_test) > 0:
+                                    # Create a DataFrame with columns in the order of num_cols_train
+                                    X_test_subset_for_scaling = X_test[cols_to_scale_in_test]
+                                    X_test_scaled_values = scaler.transform(X_test_subset_for_scaling)
+                                    X_test[cols_to_scale_in_test] = X_test_scaled_values
+                                    st.info(f"Numeric features in test data scaled using {current_scaling_method}.")
+                        else:
+                             st.session_state.scaler = None # Ensure it's None if no scaling applied
+                    else:
+                        st.session_state.scaler = None # Ensure it's None if no numeric columns
+                else:
+                    st.session_state.scaler = None # Ensure it's None if scaling_method is "None"
 
                 st.session_state.update({'X_train': X_train, 'X_test': X_test, 'y_train': y_train, 'y_test': y_test})
 
@@ -476,9 +503,7 @@ def model_training_page():
                 st.success(f"✅ Training completed! Best model: {best_model_name}")
 
             except Exception as e:
-                st.error(f"Error during training: {e}")
-                import traceback
-                st.error(traceback.format_exc())
+                display_error(e, "An error occurred during the model training process")
 
 def model_comparison_page():
     st.header("📊 Model Comparison")
@@ -561,7 +586,7 @@ def explainability_page():
                     background_data = pd.DataFrame(background_data, columns=X_test_df.columns)
                 explainer = shap.KernelExplainer(best_model.predict_proba if hasattr(best_model, 'predict_proba') else best_model.predict, background_data)
             else:
-                st.error(f"SHAP explanations not supported for {best_model_name} with current setup.")
+                st.error(f"SHAP explanations are currently not supported for the model type '{best_model_name}'. We are working on expanding compatibility.")
                 return
 
             shap_values = explainer.shap_values(X_test_df)
@@ -614,9 +639,7 @@ def explainability_page():
                 st.metric("Predicted Value", f"{predicted:.2f}")
 
         except Exception as e:
-            st.error(f"Error generating SHAP explanations: {e}")
-            import traceback
-            st.error(traceback.format_exc())
+            display_error(e, "An error occurred while generating SHAP explanations")
 
 def model_export_page():
     st.header("💾 Model Export")
@@ -664,7 +687,7 @@ def model_export_page():
             )
             st.success("Model pipeline ready for download!")
         except Exception as e:
-            st.error(f"Error exporting model: {e}")
+            display_error(e, "An error occurred while exporting the model pipeline")
 
     st.subheader("📖 How to use the exported pipeline:")
     st.code(f"""
