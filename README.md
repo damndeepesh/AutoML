@@ -94,4 +94,3 @@ We are continuously working to improve this AutoML application. Here are some fe
     *   Automated exploratory data analysis (EDA) report generation.
 
 ---
-_This application is actively developed, with assistance from AI pair programming._
