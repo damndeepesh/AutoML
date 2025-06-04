@@ -361,15 +361,21 @@ def model_training_page():
     scaling_method = col2.selectbox("Numeric Feature Scaling", options=scaling_method_options, index=1, key='scaling_method_selector') # Default to StandardScaler
     st.session_state.scaling_method = scaling_method # Store for use during preprocessing
 
+    # Initialize session state variables if they don't exist
+    if 'tuning_method' not in st.session_state:
+        st.session_state.tuning_method = None
+    if 'n_iter' not in st.session_state:
+        st.session_state.n_iter = 50 # Default value
+
     st.subheader("Hyperparameter Tuning")
     enable_tuning = st.checkbox("Enable Hyperparameter Tuning", value=False)
     if enable_tuning:
-        tuning_method = st.selectbox("Select Tuning Method", ["Grid Search", "Randomized Search"], key='tuning_method')
-        if tuning_method == "Randomized Search":
-            n_iter = st.number_input("Number of Iterations (for Randomized Search)", min_value=10, value=50, step=10)
-            st.session_state.n_iter = n_iter
-        st.session_state.tuning_method = tuning_method
+        # The selectbox will automatically update st.session_state.tuning_method
+        tuning_method_selected = st.selectbox("Select Tuning Method", ["Grid Search", "Randomized Search"], key='tuning_method')
+        if tuning_method_selected == "Randomized Search":
+            st.session_state.n_iter = st.number_input("Number of Iterations (for Randomized Search)", min_value=10, value=50, step=10, key='n_iter_randomized_search')
     else:
+        # When tuning is disabled, explicitly set tuning_method to None
         st.session_state.tuning_method = None
 
     # Auto-start training if triggered
@@ -553,38 +559,80 @@ def model_training_page():
                 n_iter = st.session_state.get('n_iter', 50) # Default for Randomized Search
 
                 for i, (name, model_info) in enumerate(models_and_params.items()):
-                    model = model_info['model']
-                    params = model_info['params']
+                    try:
+                        model = model_info['model']
+                        params = model_info['params']
 
-                    if tuning_enabled and params:
-                        status_text.text(f"Tuning {name}...")
-                        if st.session_state.tuning_method == "Grid Search":
-                            tuner = GridSearchCV(model, params, cv=cv_folds, scoring=scoring, n_jobs=-1)
-                        else: # Randomized Search
-                            tuner = RandomizedSearchCV(model, params, n_iter=n_iter, cv=cv_folds, scoring=scoring, random_state=random_state, n_jobs=-1)
+                        # Check if this is one of the newly added models
+                        is_new_model = name in ["XGBoost", "LightGBM", "CatBoost"] or name in ["XGBoost Regressor", "LightGBM Regressor", "CatBoost Regressor"]
                         
-                        tuner.fit(X_train, y_train)
-                        best_model = tuner.best_estimator_
-                        st.write(f"Best parameters for {name}: {tuner.best_params_}")
-                    else:
-                        status_text.text(f"Training {name}...")
-                        best_model = model
-                        best_model.fit(X_train, y_train)
-                    
-                    trained_models[name] = best_model
-                    
-                    y_pred_test = best_model.predict(X_test)
-                    y_proba_test = best_model.predict_proba(X_test) if hasattr(best_model, 'predict_proba') and st.session_state.problem_type == "Classification" else None
-                    
-                    metrics = get_model_metrics(y_test, y_pred_test, y_proba_test, problem_type=st.session_state.problem_type)
-                    
-                    # For tuned models, cross_val_score on the best_estimator_ might be redundant if tuner already did CV
-                    # But for consistency, we can still calculate it or use tuner.best_score_
-                    cv_score = cross_val_score(best_model, X_train, y_train, cv=cv_folds, scoring=scoring).mean()
-                    
-                    current_model_scores = {'CV Mean Score': cv_score}
-                    current_model_scores.update(metrics) # Add all relevant metrics
-                    model_scores_dict[name] = current_model_scores
+                        if is_new_model:
+                            status_text.text(f"Initializing {name}...")
+                        
+                        if tuning_enabled and params:
+                            status_text.text(f"Tuning {name}...")
+                            try:
+                                if st.session_state.tuning_method == "Grid Search":
+                                    tuner = GridSearchCV(model, params, cv=cv_folds, scoring=scoring, n_jobs=-1)
+                                else: # Randomized Search
+                                    tuner = RandomizedSearchCV(model, params, n_iter=n_iter, cv=cv_folds, scoring=scoring, random_state=random_state, n_jobs=-1)
+                                
+                                tuner.fit(X_train, y_train)
+                                best_model = tuner.best_estimator_
+                                st.write(f"Best parameters for {name}: {tuner.best_params_}")
+                            except Exception as e:
+                                display_error(e, f"Error during hyperparameter tuning for {name}")
+                                # Skip this model and continue with the next one
+                                continue
+                        else:
+                            status_text.text(f"Training {name}...")
+                            try:
+                                best_model = model
+                                best_model.fit(X_train, y_train)
+                            except Exception as e:
+                                display_error(e, f"Error during training for {name}")
+                                # Skip this model and continue with the next one
+                                continue
+                        
+                        trained_models[name] = best_model
+                        
+                        try:
+                            y_pred_test = best_model.predict(X_test)
+                            
+                            # Handle predict_proba for classification models
+                            if st.session_state.problem_type == "Classification" and hasattr(best_model, 'predict_proba'):
+                                try:
+                                    y_proba_test = best_model.predict_proba(X_test)
+                                except Exception as e:
+                                    st.warning(f"Could not compute prediction probabilities for {name}: {str(e)}")
+                                    y_proba_test = None
+                            else:
+                                y_proba_test = None
+                            
+                            metrics = get_model_metrics(y_test, y_pred_test, y_proba_test, problem_type=st.session_state.problem_type)
+                            
+                            # For tuned models, cross_val_score on the best_estimator_ might be redundant if tuner already did CV
+                            # But for consistency, we can still calculate it or use tuner.best_score_
+                            try:
+                                cv_score = cross_val_score(best_model, X_train, y_train, cv=cv_folds, scoring=scoring).mean()
+                            except Exception as e:
+                                st.warning(f"Could not compute cross-validation score for {name}: {str(e)}")
+                                cv_score = float('nan')  # Use NaN to indicate missing value
+                            
+                            current_model_scores = {'CV Mean Score': cv_score}
+                            current_model_scores.update(metrics) # Add all relevant metrics
+                            model_scores_dict[name] = current_model_scores
+                            
+                            if is_new_model:
+                                st.success(f"{name} trained successfully!")
+                        except Exception as e:
+                            display_error(e, f"Error during prediction or evaluation for {name}")
+                            # Skip adding this model to the scores dictionary
+                            continue
+                    except Exception as e:
+                        display_error(e, f"Unexpected error with {name}")
+                        # Skip this model entirely and continue with the next one
+                        continue
 
                     progress_bar.progress((i + 1) / len(models_and_params))
                 
@@ -677,19 +725,35 @@ def explainability_page():
     with st.spinner("Generating SHAP explanations..."):
         try:
             # SHAP Explainer
-            if isinstance(best_model, (RandomForestClassifier, GradientBoostingClassifier, DecisionTreeClassifier,
-                                      RandomForestRegressor, GradientBoostingRegressor, DecisionTreeRegressor)):
-                explainer = shap.TreeExplainer(best_model)
-            elif isinstance(best_model, (LogisticRegression, LinearRegression, Ridge, ElasticNet)):
-                explainer = shap.LinearExplainer(best_model, X_test_df) # Pass data for LinearExplainer
-            elif isinstance(best_model, (SVC, SVR, KNeighborsClassifier, KNeighborsRegressor, GaussianNB)):
-                 # KernelExplainer can be slow or not directly applicable for some, use a subset of X_train for background data
-                 # For KNN and Naive Bayes, KernelExplainer is a common choice for SHAP if TreeExplainer/LinearExplainer aren't suitable.
-                background_data = shap.sample(st.session_state.X_train, min(100, len(st.session_state.X_train)))
-                if isinstance(background_data, np.ndarray):
-                    background_data = pd.DataFrame(background_data, columns=X_test_df.columns)
-                explainer = shap.KernelExplainer(best_model.predict_proba if hasattr(best_model, 'predict_proba') else best_model.predict, background_data)
-            else:
+            try:
+                # Check for the newly added models first
+                if isinstance(best_model, (xgb.XGBClassifier, xgb.XGBRegressor, 
+                                          lgb.LGBMClassifier, lgb.LGBMRegressor, 
+                                          cb.CatBoostClassifier, cb.CatBoostRegressor)):
+                    st.info(f"Using TreeExplainer for {best_model_name}")
+                    explainer = shap.TreeExplainer(best_model)
+                elif isinstance(best_model, (RandomForestClassifier, GradientBoostingClassifier, DecisionTreeClassifier,
+                                          RandomForestRegressor, GradientBoostingRegressor, DecisionTreeRegressor)):
+                    explainer = shap.TreeExplainer(best_model)
+                elif isinstance(best_model, (LogisticRegression, LinearRegression, Ridge, ElasticNet)):
+                    explainer = shap.LinearExplainer(best_model, X_test_df) # Pass data for LinearExplainer
+                elif isinstance(best_model, (SVC, SVR, KNeighborsClassifier, KNeighborsRegressor, GaussianNB)):
+                     # KernelExplainer can be slow or not directly applicable for some, use a subset of X_train for background data
+                     # For KNN and Naive Bayes, KernelExplainer is a common choice for SHAP if TreeExplainer/LinearExplainer aren't suitable.
+                    background_data = shap.sample(st.session_state.X_train, min(100, len(st.session_state.X_train)))
+                    if isinstance(background_data, np.ndarray):
+                        background_data = pd.DataFrame(background_data, columns=X_test_df.columns)
+                    explainer = shap.KernelExplainer(best_model.predict_proba if hasattr(best_model, 'predict_proba') else best_model.predict, background_data)
+                else:
+                    st.warning(f"SHAP explanations might not be optimized for the model type '{best_model_name}'. Using KernelExplainer as fallback.")
+                    # Fallback to KernelExplainer for unknown model types
+                    background_data = shap.sample(st.session_state.X_train, min(100, len(st.session_state.X_train)))
+                    if isinstance(background_data, np.ndarray):
+                        background_data = pd.DataFrame(background_data, columns=X_test_df.columns)
+                    predict_fn = best_model.predict_proba if hasattr(best_model, 'predict_proba') and st.session_state.problem_type == "Classification" else best_model.predict
+                    explainer = shap.KernelExplainer(predict_fn, background_data)
+            except Exception as e:
+                display_error(e, f"Error creating SHAP explainer for {best_model_name}")
                 st.error(f"SHAP explanations are currently not supported for the model type '{best_model_name}'. We are working on expanding compatibility.")
                 return
 
@@ -764,9 +828,31 @@ def model_export_page():
     steps = []
     if st.session_state.scaler:
         steps.append(('scaler', st.session_state.scaler))
-    steps.append(('model', best_model))
-    pipeline_to_export = Pipeline(steps)
-    st.session_state.trained_pipeline = pipeline_to_export
+    
+    # Check if the model is one of the newly added models
+    is_new_model = isinstance(best_model, (xgb.XGBClassifier, xgb.XGBRegressor, 
+                                         lgb.LGBMClassifier, lgb.LGBMRegressor, 
+                                         cb.CatBoostClassifier, cb.CatBoostRegressor))
+    
+    if is_new_model:
+        st.info(f"Preparing {best_model_name} for export. These advanced models may require additional libraries when loading.")
+        
+        # Add model-specific export notes
+        if isinstance(best_model, (xgb.XGBClassifier, xgb.XGBRegressor)):
+            st.info("Note: To load this XGBoost model, ensure 'xgboost' is installed in your environment.")
+        elif isinstance(best_model, (lgb.LGBMClassifier, lgb.LGBMRegressor)):
+            st.info("Note: To load this LightGBM model, ensure 'lightgbm' is installed in your environment.")
+        elif isinstance(best_model, (cb.CatBoostClassifier, cb.CatBoostRegressor)):
+            st.info("Note: To load this CatBoost model, ensure 'catboost' is installed in your environment.")
+    
+    try:
+        steps.append(('model', best_model))
+        pipeline_to_export = Pipeline(steps)
+        st.session_state.trained_pipeline = pipeline_to_export
+    except Exception as e:
+        display_error(e, f"Error creating pipeline for {best_model_name}")
+        st.warning("Falling back to exporting model without pipeline wrapper. Some preprocessing steps may need to be applied manually.")
+        st.session_state.trained_pipeline = best_model
 
     export_format = st.selectbox("Choose export format:", ["Joblib (.joblib)", "Pickle (.pkl)"])
     file_name_suggestion = f"{best_model_name.lower().replace(' ', '_')}_pipeline"
@@ -794,9 +880,25 @@ def model_export_page():
             display_error(e, "An error occurred while exporting the model pipeline")
 
     st.subheader("📖 How to use the exported pipeline:")
-    st.code(f"""
-import joblib # or import pickle
+    # Determine if the best model is one of the newly added models
+    is_xgboost = isinstance(best_model, (xgb.XGBClassifier, xgb.XGBRegressor))
+    is_lightgbm = isinstance(best_model, (lgb.LGBMClassifier, lgb.LGBMRegressor))
+    is_catboost = isinstance(best_model, (cb.CatBoostClassifier, cb.CatBoostRegressor))
+    
+    # Create code example with appropriate imports based on the model type
+    code_example = f"""import joblib # or import pickle
 import pandas as pd
+"""
+    
+    # Add model-specific imports if needed
+    if is_xgboost:
+        code_example += "import xgboost as xgb  # Required for XGBoost models\n"
+    if is_lightgbm:
+        code_example += "import lightgbm as lgb  # Required for LightGBM models\n"
+    if is_catboost:
+        code_example += "import catboost as cb  # Required for CatBoost models\n"
+    
+    code_example += f"""
 
 # Load the pipeline
 pipeline = joblib.load('{file_name}{'.joblib' if 'Joblib' in export_format else '.pkl'}')
@@ -810,7 +912,20 @@ pipeline = joblib.load('{file_name}{'.joblib' if 'Joblib' in export_format else 
 # Make predictions
 # predictions = pipeline.predict(new_data)
 # print(predictions)
-""", language='python')
+
+# For classification models with probability output
+# if hasattr(pipeline, 'predict_proba'):
+#     probabilities = pipeline.predict_proba(new_data)
+#     print(probabilities)
+"""
+    
+    st.code(code_example, language='python')
+    
+    # Add additional notes for advanced models
+    if is_xgboost or is_lightgbm or is_catboost:
+        st.info("⚠️ Note: When deploying this model in production, ensure all required libraries are installed in your deployment environment.")
+        st.info("💡 Tip: Consider using Docker to create a consistent environment for model deployment.")
+
 
 # --- Main Application ---
 def main():
