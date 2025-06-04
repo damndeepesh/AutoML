@@ -696,20 +696,130 @@ def model_comparison_page():
         st.subheader(f"📋 Detailed Metrics for Best Model: {best_model_name}")
         best_model = st.session_state.best_model_info['model']
         y_pred = best_model.predict(st.session_state.X_test)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.text("Classification Report:")
-            report_df = pd.DataFrame(classification_report(st.session_state.y_test, y_pred, output_dict=True)).transpose()
-            st.dataframe(report_df.round(3), use_container_width=True)
-        with col2:
-            st.text("Confusion Matrix:")
-            cm = confusion_matrix(st.session_state.y_test, y_pred)
-            fig_cm, ax_cm = plt.subplots()
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax_cm)
-            ax_cm.set_xlabel('Predicted')
-            ax_cm.set_ylabel('Actual')
-            st.pyplot(fig_cm)
+        y_test = st.session_state.y_test
+
+        # Confusion Matrix
+        st.write("#### Confusion Matrix")
+        cm = confusion_matrix(y_test, y_pred)
+        fig_cm, ax_cm = plt.subplots()
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax_cm)
+        ax_cm.set_xlabel('Predicted')
+        ax_cm.set_ylabel('Actual')
+        ax_cm.set_title('Confusion Matrix')
+        st.pyplot(fig_cm)
+
+        # Classification Report
+        st.write("#### Classification Report")
+        report = classification_report(y_test, y_pred, output_dict=True)
+        report_df = pd.DataFrame(report).transpose()
+        st.dataframe(report_df.round(4))
+
+        # ROC Curve and AUC
+        if hasattr(best_model, 'predict_proba'):
+            st.write("#### ROC Curve")
+            try:
+                y_proba = best_model.predict_proba(st.session_state.X_test)
+                if y_proba.shape[1] > 2: # Multi-class classification
+                    # For multi-class, plot one-vs-rest ROC curves
+                    from sklearn.preprocessing import LabelBinarizer
+                    lb = LabelBinarizer()
+                    y_test_binarized = lb.fit_transform(y_test)
+                    
+                    fig_roc, ax_roc = plt.subplots()
+                    for i in range(y_proba.shape[1]):
+                        fpr, tpr, _ = roc_curve(y_test_binarized[:, i], y_proba[:, i])
+                        roc_auc = auc(fpr, tpr)
+                        ax_roc.plot(fpr, tpr, label=f'Class {lb.classes_[i]} (AUC = {roc_auc:.2f})')
+                    ax_roc.plot([0, 1], [0, 1], 'k--', label='Random Classifier')
+                    ax_roc.set_xlabel('False Positive Rate')
+                    ax_roc.set_ylabel('True Positive Rate')
+                    ax_roc.set_title('ROC Curve (One-vs-Rest)')
+                    ax_roc.legend(loc='lower right')
+                    st.pyplot(fig_roc)
+                else: # Binary classification
+                    fpr, tpr, _ = roc_curve(y_test, y_proba[:, 1])
+                    roc_auc = auc(fpr, tpr)
+                    fig_roc, ax_roc = plt.subplots()
+                    ax_roc.plot(fpr, tpr, label=f'ROC curve (area = {roc_auc:.2f})')
+                    ax_roc.plot([0, 1], [0, 1], 'k--', label='Random Classifier')
+                    ax_roc.set_xlabel('False Positive Rate')
+                    ax_roc.set_ylabel('True Positive Rate')
+                    ax_roc.set_title('Receiver Operating Characteristic (ROC) Curve')
+                    ax_roc.legend(loc='lower right')
+                    st.pyplot(fig_roc)
+            except Exception as e:
+                st.warning(f"Could not plot ROC curve: {e}")
+
+            # Precision-Recall Curve
+            st.write("#### Precision-Recall Curve")
+            try:
+                if y_proba.shape[1] > 2: # Multi-class classification
+                    # For multi-class, plot one-vs-rest Precision-Recall curves
+                    from sklearn.preprocessing import LabelBinarizer
+                    lb = LabelBinarizer()
+                    y_test_binarized = lb.fit_transform(y_test)
+
+                    fig_pr, ax_pr = plt.subplots()
+                    for i in range(y_proba.shape[1]):
+                        precision, recall, _ = precision_recall_curve(y_test_binarized[:, i], y_proba[:, i])
+                        pr_auc = auc(recall, precision)
+                        ax_pr.plot(recall, precision, label=f'Class {lb.classes_[i]} (AUC = {pr_auc:.2f})')
+                    ax_pr.set_xlabel('Recall')
+                    ax_pr.set_ylabel('Precision')
+                    ax_pr.set_title('Precision-Recall Curve (One-vs-Rest)')
+                    ax_pr.legend(loc='lower left')
+                    st.pyplot(fig_pr)
+                else: # Binary classification
+                    precision, recall, _ = precision_recall_curve(y_test, y_proba[:, 1])
+                    pr_auc = auc(recall, precision)
+                    fig_pr, ax_pr = plt.subplots()
+                    ax_pr.plot(recall, precision, label=f'Precision-Recall curve (area = {pr_auc:.2f})')
+                    ax_pr.set_xlabel('Recall')
+                    ax_pr.set_ylabel('Precision')
+                    ax_pr.set_title('Precision-Recall Curve')
+                    ax_pr.legend(loc='lower left')
+                    st.pyplot(fig_pr)
+            except Exception as e:
+                st.warning(f"Could not plot Precision-Recall curve: {e}")
+        else:
+            st.info("Model does not support `predict_proba` for ROC/PR curves.")
+
+    elif st.session_state.problem_type == "Regression" and st.session_state.X_test is not None:
+        st.subheader(f"📋 Detailed Metrics for Best Model: {best_model_name}")
+        best_model = st.session_state.best_model_info['model']
+        y_pred = best_model.predict(st.session_state.X_test)
+        y_test = st.session_state.y_test
+
+        # Residual Plot
+        st.write("#### Residual Plot")
+        residuals = y_test - y_pred
+        fig_res, ax_res = plt.subplots()
+        ax_res.scatter(y_pred, residuals)
+        ax_res.axhline(y=0, color='r', linestyle='--')
+        ax_res.set_xlabel('Predicted Values')
+        ax_res.set_ylabel('Residuals')
+        ax_res.set_title('Residual Plot')
+        st.pyplot(fig_res)
+
+        # Actual vs. Predicted Plot
+        st.write("#### Actual vs. Predicted Plot")
+        fig_ap, ax_ap = plt.subplots()
+        ax_ap.scatter(y_test, y_pred)
+        ax_ap.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--', lw=2) # Diagonal line
+        ax_ap.set_xlabel('Actual Values')
+        ax_ap.set_ylabel('Predicted Values')
+        ax_ap.set_title('Actual vs. Predicted Plot')
+        st.pyplot(fig_ap)
+
+    # st.subheader("Cross-Validation Score Details")
+    # if st.session_state.model_scores:
+    #     cv_scores_df = pd.DataFrame({
+    #         'Model': list(st.session_state.model_scores.keys()),
+    #         'CV Mean Score': [v.get('CV Mean Score', 'N/A') for v in st.session_state.model_scores.values()]
+    #     })
+    #     st.dataframe(cv_scores_df.round(4), use_container_width=True)
+    # else:
+    #     st.info("No cross-validation scores available.")
 
 def explainability_page():
     st.header("🔍 Model Explainability (SHAP)")
